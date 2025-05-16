@@ -10,6 +10,7 @@
 - 配置文件支持命令行工具和HTTP服务
 - 对话历史保存与管理
 - 流式输出支持
+- 支持Docker一键部署
 
 ## 前置条件
 
@@ -128,6 +129,73 @@ python web_server.py
 
 点击右上角的"配置"标签，可以查看和编辑MCP服务器配置。修改配置后点击"更新配置"按钮，服务器将自动重启并应用新配置。
 
+## Docker部署
+
+本项目支持通过Docker一键部署，无需手动安装依赖。Docker镜像包含了以下组件：
+
+- Python 3.9 环境
+- Node.js 和 npm
+- uvx 工具（MCP服务）
+- Playwright 浏览器自动化工具（包含Chromium浏览器）
+- 所有必要的Python依赖
+
+### 1. 构建Docker镜像
+
+在项目根目录下执行：
+
+```bash
+cd agent/mcp-test-tool/testserver
+docker build -t mcp-agent-web .
+```
+
+### 2. 运行Docker容器
+
+```bash
+# 创建.env文件
+cat > .env << EOF
+MCP_LLM_API_MODEL_NAME=你的模型名称
+MCP_LLM_API_BASE_URL=你的API基础URL
+MCP_LLM_API_KEY=你的API密钥
+EOF
+
+# 启动容器
+docker run -d \
+  --name mcp-agent \
+  -p 8000:8000 \
+  --env-file .env \
+  -v $(pwd)/mcp_server_config.json:/app/mcp_server_config.json \
+  mcp-agent-web
+```
+
+### 3. 使用docker-compose部署（推荐）
+
+项目提供了`docker-compose.yml`配置文件，可以更简单地进行部署：
+
+```bash
+# 创建.env文件
+cat > .env << EOF
+MCP_LLM_API_MODEL_NAME=你的模型名称
+MCP_LLM_API_BASE_URL=你的API基础URL
+MCP_LLM_API_KEY=你的API密钥
+EOF
+
+# 启动服务
+docker-compose up -d
+
+# 查看日志
+docker-compose logs -f
+```
+
+要停止服务，使用：
+
+```bash
+docker-compose down
+```
+
+### 4. 访问Web界面
+
+在浏览器中打开 http://localhost:8000 即可使用。
+
 ## 使用指南
 
 ### 基本使用
@@ -160,6 +228,13 @@ python web_server.py
 - 查看服务器日志中是否有错误信息
 - 对于HTTP类型的MCP服务，确认URL和access_token正确
 
+### Docker相关问题
+
+- 确保Docker服务正在运行
+- 检查容器日志：`docker logs mcp-agent`
+- 如果出现权限问题，确保卷挂载的目录有正确的权限
+- 若端口被占用，更改映射端口：`-p 8080:8000`（使用8080替代8000）
+
 ### API调用失败
 
 - 确认API密钥配置正确
@@ -185,6 +260,9 @@ python web_server.py
   - `styles.css` - 样式文件
   - `script.js` - 前端交互脚本
 - `mcp_server_config.json` - MCP服务器配置
+- `Dockerfile` - Docker部署配置（集成Playwright环境）
+- `docker-compose.yml` - Docker Compose配置文件
+- `.dockerignore` - Docker构建排除文件列表
 
 ## 使用方法
 

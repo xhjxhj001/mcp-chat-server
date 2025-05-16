@@ -17,6 +17,8 @@ from pydantic_ai.providers.openai import OpenAIProvider
 from dotenv import load_dotenv
 import uuid
 from datetime import datetime
+import shutil
+from pydantic_ai.messages import ModelRequest, UserPromptPart, ModelResponse, TextPart
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -146,6 +148,18 @@ def load_mcp_servers_from_config(config_path: str = MCP_CONFIG_PATH) -> List:
                 # 创建环境变量字典，合并当前环境变量
                 environment = os.environ.copy()
                 environment.update(env)
+
+                # 检查命令是否为绝对路径，如果不是，则在PATH中查找
+                if not os.path.isabs(command) and os.path.sep not in command:
+                    # 使用shutil.which查找可执行文件的完整路径
+                    cmd_path = shutil.which(
+                        command, path=environment.get('PATH'))
+                    if cmd_path:
+                        logger.info(f"命令 '{command}' 在PATH中找到: {cmd_path}")
+                        command = cmd_path
+                    else:
+                        logger.warning(
+                            f"命令 '{command}' 不是绝对路径且在PATH中未找到，尝试直接使用")
 
                 server = MCPServerStdio(
                     command=command,
@@ -331,11 +345,13 @@ async def query(request: QueryRequest) -> QueryResponse:
             # 获取最近的N轮对话
             recent_messages = messages[-turns_count*2:]
             for msg in recent_messages:
-                # 转换为PydanticAI消息格式 - 使用字符串而不是字典
+                # 转换为PydanticAI消息格式
                 if msg.role == "user":
-                    message_history.append(f"user: {msg.content}")
+                    message_history.append(ModelRequest(
+                        parts=[UserPromptPart(msg.content)]))
                 elif msg.role == "assistant":
-                    message_history.append(f"assistant: {msg.content}")
+                    message_history.append(ModelResponse(
+                        parts=[TextPart(msg.content)]))
 
     try:
         # 执行查询
@@ -442,11 +458,13 @@ async def query_stream(request: QueryRequest):
             # 获取最近的N轮对话
             recent_messages = messages[-turns_count*2:]
             for msg in recent_messages:
-                # 转换为PydanticAI消息格式 - 使用字符串而不是字典
+                # 转换为PydanticAI消息格式
                 if msg.role == "user":
-                    message_history.append(f"user: {msg.content}")
+                    message_history.append(ModelRequest(
+                        parts=[UserPromptPart(msg.content)]))
                 elif msg.role == "assistant":
-                    message_history.append(f"assistant: {msg.content}")
+                    message_history.append(ModelResponse(
+                        parts=[TextPart(msg.content)]))
 
     # 完整响应内容
     full_response = ""

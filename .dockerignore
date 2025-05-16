@@ -1,0 +1,30 @@
+# Git相关
+.git
+.gitignore
+
+# 虚拟环境
+venv/
+env/
+__pycache__/
+
+# 个人配置文件（实际部署时需要单独配置）
+.env
+
+# 日志和临时文件
+*.log
+*.tmp
+*.pid
+
+# 文档和测试文件
+docs/
+tests/
+*.md
+
+# 保留README.md
+!README.md
+
+# 编辑器配置目录
+.vscode/
+.idea/
+*.swp
+*.swo 
