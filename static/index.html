@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MCP Agent 助手</title>
+    <link rel="stylesheet" href="styles.css">
+    <!-- 使用Font Awesome图标 -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- 添加CodeMirror库，用于JSON编辑器高亮 -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/codemirror.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/theme/dracula.min.css">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/codemirror.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.62.0/mode/javascript/javascript.min.js"></script>
+    <!-- 添加Markdown解析库 -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <!-- 添加语法高亮库 -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.7.0/styles/github.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.7.0/highlight.min.js"></script>
+    <!-- 添加DOMPurify防止XSS攻击 -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.1/purify.min.js"></script>
+</head>
+
+<body>
+    <div class="app-container">
+        <!-- 侧边栏 -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h2><i class="fas fa-comments"></i> 对话列表</h2>
+                <button id="new-chat-button" class="icon-button" title="新对话">
+                    <i class="fas fa-plus"></i>
+                </button>
+            </div>
+
+            <div class="sidebar-content">
+                <div id="conversations-list" class="conversations-list">
+                    <!-- 对话列表将在这里动态生成 -->
+                </div>
+            </div>
+
+            <div class="sidebar-footer">
+                <button id="clear-all-button" class="danger-button" title="清空所有对话">
+                    <i class="fas fa-trash"></i> 清空所有对话
+                </button>
+            </div>
+        </aside>
+
+        <!-- 主内容区 -->
+        <main class="main-content">
+            <header class="main-header">
+                <h1><i class="fas fa-robot"></i> MCP Agent 智能助手</h1>
+                <div class="header-controls">
+                    <div class="history-controls">
+                        <label for="history-turns">历史轮数:</label>
+                        <select id="history-turns">
+                            <option value="0">不使用历史</option>
+                            <option value="1">1轮</option>
+                            <option value="2">2轮</option>
+                            <option value="3">3轮</option>
+                            <option value="5" selected>5轮</option>
+                            <option value="10">10轮</option>
+                            <option value="-1">全部</option>
+                        </select>
+                    </div>
+                    <nav>
+                        <ul class="nav-tabs">
+                            <li class="tab active" data-tab="chat-tab">
+                                <i class="fas fa-comments"></i> 聊天
+                            </li>
+                            <li class="tab" data-tab="config-tab">
+                                <i class="fas fa-cog"></i> 配置
+                            </li>
+                        </ul>
+                    </nav>
+                </div>
+            </header>
+
+            <div class="tab-contents">
+                <!-- 聊天界面 -->
+                <div id="chat-tab" class="tab-content active">
+                    <div class="chat-container">
+                        <div id="chat-messages" class="chat-messages">
+                            <!-- 初始消息将在脚本中添加 -->
+                        </div>
+
+                        <div class="input-container">
+                            <textarea id="user-input" placeholder="请输入您的问题..." rows="2"></textarea>
+                            <div class="input-controls">
+                                <button id="stream-toggle" title="切换流式响应" class="toggle-button active">
+                                    <i class="fas fa-stream"></i>
+                                </button>
+                                <button id="send-button" title="发送">
+                                    <i class="fas fa-paper-plane"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 配置界面 -->
+                <div id="config-tab" class="tab-content">
+                    <div class="config-container">
+                        <h2><i class="fas fa-server"></i> MCP 服务器配置</h2>
+                        <p class="config-description">
+                            在这里编辑MCP服务器配置。配置更新后，服务器将自动重启并应用新配置。
+                        </p>
+
+                        <div class="editor-container">
+                            <textarea id="config-editor"></textarea>
+                        </div>
+
+                        <div class="button-container">
+                            <button id="update-config-button" class="primary-button">
+                                <i class="fas fa-save"></i> 更新配置
+                            </button>
+                            <div id="config-status" class="status-message"></div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 对话标题编辑对话框 -->
+    <div id="edit-title-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>编辑对话标题</h3>
+                <button class="close-button">&times;</button>
+            </div>
+            <div class="modal-body">
+                <input type="text" id="conversation-title-input" placeholder="请输入对话标题">
+            </div>
+            <div class="modal-footer">
+                <button id="save-title-button" class="primary-button">保存</button>
+                <button class="cancel-button">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- 确认对话框 -->
+    <div id="confirm-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>确认操作</h3>
+                <button class="close-button">&times;</button>
+            </div>
+            <div class="modal-body">
+                <p id="confirm-message">您确定要执行此操作吗？</p>
+            </div>
+            <div class="modal-footer">
+                <button id="confirm-yes-button" class="danger-button">确定</button>
+                <button class="cancel-button">取消</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+
+</html>

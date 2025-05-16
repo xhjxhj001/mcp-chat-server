@@ -1,0 +1,1004 @@
+// API端点全局常量
+const QUERY_API_ENDPOINT = '/api/query';
+const STREAM_API_ENDPOINT = '/api/stream';
+const CONFIG_API_ENDPOINT = '/api/config';
+const CONVERSATIONS_API_ENDPOINT = '/api/conversations';
+
+// 全局变量
+let currentConversationId = null;
+let conversations = [];
+let isProcessing = false;
+let chatMessages = null;
+let userInput = null;
+let isStreaming = true;
+let isWaitingForResponse = false;
+let sendButton = null;
+let historyTurnsSelect = null;
+let currentStreamController = null; // 添加AbortController跟踪当前流式请求
+
+// 更新Markdown内容
+function updateMarkdownContent(element, content) {
+    // 使用marked库解析Markdown
+    if (typeof marked === 'undefined') {
+        console.error('marked库未加载');
+        element.textContent = content;
+        return;
+    }
+
+    try {
+        const rawHtml = marked.parse(content);
+        // 使用DOMPurify清理HTML以防XSS攻击
+        if (typeof DOMPurify !== 'undefined') {
+            element.innerHTML = DOMPurify.sanitize(rawHtml);
+        } else {
+            console.warn('DOMPurify未加载，跳过HTML清理');
+            element.innerHTML = rawHtml;
+        }
+
+        // 代码块语法高亮
+        if (typeof hljs !== 'undefined') {
+            element.querySelectorAll('pre code').forEach(block => {
+                hljs.highlightElement(block);
+            });
+        }
+    } catch (error) {
+        console.error('Markdown渲染错误:', error);
+        element.textContent = content;
+    }
+}
+
+// 在全局定义addMessage函数
+function addMessage(type, content) {
+    if (!chatMessages) {
+        chatMessages = document.getElementById('chat-messages');
+        if (!chatMessages) {
+            console.error('聊天消息容器未找到');
+            return null;
+        }
+    }
+
+    const messageElement = document.createElement('div');
+    messageElement.className = `message ${type}`;
+
+    const contentElement = document.createElement('div');
+    contentElement.className = 'message-content';
+
+    // 创建Markdown内容容器
+    const markdownContent = document.createElement('div');
+    markdownContent.className = 'markdown-content';
+
+    // 根据消息类型设置内容
+    if (type === 'user') {
+        markdownContent.textContent = content;
+    } else if (type === 'assistant' || type === 'system') {
+        if (content) {
+            updateMarkdownContent(markdownContent, content);
+        }
+    }
+
+    contentElement.appendChild(markdownContent);
+    messageElement.appendChild(contentElement);
+    chatMessages.appendChild(messageElement);
+
+    scrollToBottom();
+    return messageElement;
+}
+
+// 滚动到底部
+function scrollToBottom() {
+    if (chatMessages) {
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+}
+
+// 加载对话列表
+async function fetchConversations() {
+    try {
+        const response = await fetch(CONVERSATIONS_API_ENDPOINT);
+        if (!response.ok) throw new Error(`服务器错误: ${response.status}`);
+
+        const data = await response.json();
+        conversations = data.conversations || [];
+
+        updateConversationsList();
+        return data;
+    } catch (error) {
+        console.error('加载对话列表失败:', error);
+        if (typeof addMessage === 'function' && chatMessages) {
+            addMessage('system', `加载对话列表失败: ${error.message}`);
+        } else {
+            console.error('addMessage函数未定义或chatMessages未初始化');
+        }
+        return null;
+    }
+}
+
+// 渲染对话列表
+function updateConversationsList() {
+    const conversationsList = document.getElementById('conversations-list');
+    if (!conversationsList) {
+        console.error('conversations-list元素未找到');
+        return;
+    }
+
+    conversationsList.innerHTML = '';
+
+    conversations.forEach(conversation => {
+        const item = document.createElement('div');
+        item.className = 'conversation-item';
+        if (conversation.id === currentConversationId) {
+            item.classList.add('active');
+        }
+
+        // 创建标题元素
+        const title = document.createElement('div');
+        title.className = 'conversation-title';
+        title.textContent = conversation.title || '新对话';
+
+        // 创建操作按钮容器
+        const actions = document.createElement('div');
+        actions.className = 'conversation-actions';
+
+        // 创建编辑按钮
+        const editButton = document.createElement('button');
+        editButton.className = 'action-button';
+        editButton.innerHTML = '<i class="fas fa-edit"></i>';
+        editButton.title = '编辑标题';
+        editButton.addEventListener('click', (e) => {
+            e.stopPropagation();
+            openEditTitleModal(conversation.id, conversation.title);
+        });
+
+        // 创建删除按钮
+        const deleteButton = document.createElement('button');
+        deleteButton.className = 'action-button';
+        deleteButton.innerHTML = '<i class="fas fa-trash"></i>';
+        deleteButton.title = '删除对话';
+        deleteButton.addEventListener('click', (e) => {
+            e.stopPropagation();
+            confirmDeleteConversation(conversation.id);
+        });
+
+        // 将按钮添加到操作容器
+        actions.appendChild(editButton);
+        actions.appendChild(deleteButton);
+
+        // 将标题和操作添加到项目
+        item.appendChild(title);
+        item.appendChild(actions);
+
+        // 添加点击事件切换对话
+        item.addEventListener('click', () => openConversation(conversation.id));
+
+        // 添加到列表
+        conversationsList.appendChild(item);
+    });
+}
+
+// 打开指定对话
+async function openConversation(conversationId) {
+    try {
+        // 如果当前有进行中的流式请求，取消它
+        if (currentStreamController) {
+            currentStreamController.abort();
+            currentStreamController = null;
+        }
+
+        currentConversationId = conversationId;
+
+        // 更新UI激活状态
+        updateConversationsList();
+
+        // 获取chatMessages元素（如果尚未获取）
+        if (!chatMessages) {
+            chatMessages = document.getElementById('chat-messages');
+            if (!chatMessages) {
+                console.error('聊天消息容器未找到');
+                return;
+            }
+        }
+
+        // 清空当前聊天消息
+        chatMessages.innerHTML = '';
+
+        // 获取对话历史
+        const response = await fetch(`${CONVERSATIONS_API_ENDPOINT}/${conversationId}`);
+        if (!response.ok) throw new Error(`服务器错误: ${response.status}`);
+
+        const data = await response.json();
+
+        // 渲染历史消息
+        if (data.conversation && data.conversation.messages && data.conversation.messages.length > 0) {
+            data.conversation.messages.forEach(msg => {
+                addMessage(msg.role, msg.content);
+            });
+        } else {
+            // 添加欢迎消息
+            addMessage('system', '你好！我是MCP Agent智能助手，我可以回答问题并使用各种工具帮助你。请输入你的问题。');
+        }
+
+        // 滚动到底部
+        scrollToBottom();
+    } catch (error) {
+        console.error('打开对话失败:', error);
+        if (typeof addMessage === 'function' && chatMessages) {
+            addMessage('system', `打开对话失败: ${error.message}`);
+        } else {
+            console.error('addMessage函数未定义或chatMessages未初始化');
+        }
+    }
+}
+
+// 创建新对话
+async function createNewConversation() {
+    if (isProcessing) return;
+    isProcessing = true;
+
+    try {
+        const response = await fetch(CONVERSATIONS_API_ENDPOINT, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({ title: '新对话' })
+        });
+
+        if (!response.ok) {
+            throw new Error(`创建对话失败: ${response.status}`);
+        }
+
+        const data = await response.json();
+        const conversationId = data.conversation?.id || data.conversation_id;
+
+        if (!conversationId) {
+            throw new Error('服务器响应中未包含对话ID');
+        }
+
+        await fetchConversations();
+        openConversation(conversationId);
+    } catch (error) {
+        console.error('创建新对话出错:', error);
+        alert(`创建新对话失败: ${error.message}`);
+    } finally {
+        isProcessing = false;
+    }
+}
+
+// 更新助手消息内容
+function updateAssistantMessage(messageElement, content, isStreaming = false) {
+    const contentElement = messageElement.querySelector('.markdown-content');
+
+    try {
+        if (isStreaming) {
+            // 流式更新使用简单格式化
+            let formattedContent = content
+                // 格式化粗体
+                .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+                // 格式化斜体
+                .replace(/\*(.*?)\*/g, '<em>$1</em>')
+                // 格式化行内代码
+                .replace(/`([^`]+)`/g, '<code>$1</code>')
+                // 替换换行
+                .replace(/\n/g, '<br>');
+
+            contentElement.innerHTML = DOMPurify.sanitize(formattedContent);
+        } else {
+            // 最终内容使用完整Markdown渲染
+            updateMarkdownContent(contentElement, content);
+        }
+    } catch (error) {
+        console.error('格式化消息内容时出错:', error);
+        contentElement.textContent = content; // 回退到纯文本
+    }
+
+    scrollToBottom();
+}
+
+// 添加DOMContentLoaded事件处理
+document.addEventListener('DOMContentLoaded', async () => {
+    console.log('DOM已加载，初始化应用...');
+
+    // 初始化全局变量
+    chatMessages = document.getElementById('chat-messages');
+    userInput = document.getElementById('user-input');
+    sendButton = document.getElementById('send-button');
+    historyTurnsSelect = document.getElementById('history-turns');
+    const streamToggle = document.getElementById('stream-toggle');
+    const updateConfigButton = document.getElementById('update-config-button');
+    const configStatus = document.getElementById('config-status');
+    const configEditor = document.getElementById('config-editor');
+
+    // 初始化标准按钮事件监听器
+    if (sendButton) {
+        sendButton.addEventListener('click', handleSendMessage);
+    }
+
+    // 输入框按键事件 (回车键发送，Shift+回车换行)
+    if (userInput) {
+        userInput.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleSendMessage();
+            }
+        });
+
+        // 页面加载时初始化 - 聚焦输入框
+        userInput.focus();
+    }
+
+    // 流式响应切换按钮
+    if (streamToggle) {
+        streamToggle.addEventListener('click', () => {
+            isStreaming = !isStreaming;
+            streamToggle.classList.toggle('active', isStreaming);
+        });
+    }
+
+    // 配置更新按钮
+    if (updateConfigButton) {
+        updateConfigButton.addEventListener('click', updateConfig);
+    }
+
+    // 标签页切换初始化
+    const tabs = document.querySelectorAll('.tab');
+    const tabContents = document.querySelectorAll('.tab-content');
+    tabs.forEach(tab => {
+        tab.addEventListener('click', () => {
+            const tabId = tab.getAttribute('data-tab');
+
+            // 更新活动标签
+            tabs.forEach(t => t.classList.remove('active'));
+            tab.classList.add('active');
+
+            // 更新活动内容
+            tabContents.forEach(tc => tc.classList.remove('active'));
+            document.getElementById(tabId).classList.add('active');
+        });
+    });
+
+    // 新建对话按钮
+    const newChatButton = document.getElementById('new-chat-button');
+    if (newChatButton) {
+        newChatButton.addEventListener('click', createNewConversation);
+    }
+
+    // 清空所有对话按钮
+    const clearAllButton = document.getElementById('clear-all-button');
+    if (clearAllButton) {
+        clearAllButton.addEventListener('click', confirmClearAllConversations);
+    }
+
+    // 编辑标题确认按钮
+    const saveTitleButton = document.getElementById('save-title-button');
+    if (saveTitleButton) {
+        saveTitleButton.addEventListener('click', saveConversationTitle);
+    }
+
+    // 模态对话框关闭按钮
+    document.querySelectorAll('.close-button, .cancel-button').forEach(button => {
+        button.addEventListener('click', () => {
+            document.querySelectorAll('.modal').forEach(modal => {
+                modal.classList.remove('active');
+            });
+        });
+    });
+
+    // 确认删除按钮
+    const confirmYesButton = document.getElementById('confirm-yes-button');
+    if (confirmYesButton) {
+        confirmYesButton.addEventListener('click', handleConfirmAction);
+    }
+
+    try {
+        // 加载对话历史
+        await fetchConversations();
+
+        // 创建新对话如果不存在
+        if (conversations.length === 0) {
+            await createNewConversation();
+        } else {
+            // 打开最近的对话
+            await openConversation(conversations[0].id);
+        }
+    } catch (error) {
+        console.error('初始化过程出错:', error);
+        if (typeof addMessage === 'function' && chatMessages) {
+            addMessage('system', `初始化失败: ${error.message}`);
+        } else {
+            console.error('无法显示错误消息: addMessage函数未定义或chatMessages未初始化');
+        }
+    }
+});
+
+// 处理发送消息
+async function handleSendMessage() {
+    // 获取用户输入
+    if (!userInput) {
+        userInput = document.getElementById('user-input');
+        if (!userInput) {
+            console.error('用户输入框未找到');
+            return;
+        }
+    }
+
+    // 获取历史轮次设置
+    if (!historyTurnsSelect) {
+        historyTurnsSelect = document.getElementById('history-turns');
+    }
+
+    // 获取输入内容并清空输入框
+    const query = userInput.value.trim();
+    if (!query) return;
+
+    // 清空输入框
+    userInput.value = '';
+
+    // 如果未选择对话，自动创建新对话
+    if (!currentConversationId) {
+        await createNewConversation();
+    }
+
+    // 禁用发送按钮防止重复提交
+    if (sendButton) {
+        sendButton.disabled = true;
+        isWaitingForResponse = true;
+    }
+
+    // 添加用户消息
+    addMessage('user', query);
+
+    try {
+        // 获取历史轮次设置
+        const historyTurns = historyTurnsSelect ? parseInt(historyTurnsSelect.value) : 5;
+
+        // 如果当前有进行中的流式请求，取消它
+        if (currentStreamController) {
+            currentStreamController.abort();
+            currentStreamController = null;
+        }
+
+        // 根据流式开关设置使用不同处理方式
+        if (isStreaming) {
+            await handleStreamRequest(query, historyTurns);
+        } else {
+            await handleStandardRequest(query, historyTurns);
+        }
+
+        // 确保对话列表更新（可能有新对话被创建）
+        await fetchConversations();
+    } catch (error) {
+        console.error('处理消息时发生错误:', error);
+        addMessage('system', `处理消息时发生错误: ${error.message}`);
+    } finally {
+        // 重新启用发送按钮
+        if (sendButton) {
+            sendButton.disabled = false;
+            isWaitingForResponse = false;
+        }
+    }
+}
+
+// 处理标准请求
+async function handleStandardRequest(query, historyTurns) {
+    // 显示加载指示器
+    const loadingMessage = addMessage('assistant', '');
+    const loadingElement = document.createElement('div');
+    loadingElement.className = 'typing-indicator';
+    loadingElement.innerHTML = '<span></span><span></span><span></span>';
+    loadingMessage.querySelector('.message-content').appendChild(loadingElement);
+
+    try {
+        const response = await fetch(QUERY_API_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                query,
+                conversation_id: currentConversationId,
+                history_turns: historyTurns
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error(`服务器错误: ${response.status}`);
+        }
+
+        const data = await response.json();
+        console.log("接收到非流式回复:", data); // 添加日志
+
+        // 删除加载指示器
+        const typingIndicator = loadingMessage.querySelector('.typing-indicator');
+        if (typingIndicator) {
+            typingIndicator.remove();
+        }
+
+        // 更新消息内容 - 使用正确的属性名answer而不是response
+        updateAssistantMessage(loadingMessage, data.answer);
+    } catch (error) {
+        // 删除加载指示器并显示错误
+        const typingIndicator = loadingMessage.querySelector('.typing-indicator');
+        if (typingIndicator) {
+            typingIndicator.remove();
+        }
+        updateAssistantMessage(loadingMessage, `抱歉，处理请求时发生错误: ${error.message}`);
+    }
+}
+
+// 处理流式请求
+async function handleStreamRequest(query, historyTurns) {
+    // 添加助手消息占位符
+    const assistantMessage = addMessage('assistant', '');
+    const contentElement = assistantMessage.querySelector('.message-content');
+    if (!contentElement) {
+        console.error('消息内容元素未找到');
+        return;
+    }
+
+    // 添加打字指示器
+    const typingIndicator = document.createElement('div');
+    typingIndicator.className = 'typing-indicator';
+    typingIndicator.innerHTML = '<span></span><span></span><span></span>';
+    contentElement.appendChild(typingIndicator);
+
+    // 初始化响应处理变量
+    let buffer = '';
+    let firstChunk = true;
+    let hasFinalContent = false;
+    let typingTimeout = null;
+
+    // 闪烁光标效果
+    const cursorElement = document.createElement('span');
+    cursorElement.className = 'typing-cursor';
+    cursorElement.textContent = '|';
+
+    // 创建Markdown内容容器
+    const mdContainer = document.createElement('div');
+    mdContainer.className = 'markdown-content-stream';
+
+    try {
+        // 创建新的AbortController
+        currentStreamController = new AbortController();
+
+        // 发送流式请求
+        const response = await fetch(STREAM_API_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                query,
+                conversation_id: currentConversationId,
+                history_turns: historyTurns
+            }),
+            signal: currentStreamController.signal
+        });
+
+        if (!response.ok) {
+            throw new Error(`服务器错误: ${response.status}`);
+        }
+
+        // 获取响应流
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+
+        // 移除打字指示器并添加Markdown容器
+        if (contentElement.contains(typingIndicator)) {
+            contentElement.removeChild(typingIndicator);
+            contentElement.appendChild(mdContainer);
+            mdContainer.appendChild(cursorElement);
+            startCursorBlink();
+        }
+
+        // 处理流数据
+        while (true) {
+            const { done, value } = await reader.read();
+
+            if (done) {
+                break;
+            }
+
+            // 解码当前块
+            const chunk = decoder.decode(value, { stream: true });
+            const lines = chunk.split('\n');
+
+            // 处理每行数据
+            for (const line of lines) {
+                if (!line.trim()) continue;
+
+                try {
+                    const data = JSON.parse(line);
+
+                    // 根据数据类型处理
+                    if (data.type === 'content' && data.content) {
+                        buffer += data.content;
+                        updateStreamingContent(mdContainer, buffer);
+                        resetCursorBlink();
+                    }
+                    else if (data.type === 'final' && data.content) {
+                        buffer = data.content;
+                        hasFinalContent = true;
+
+                        // 移除光标并显示最终内容
+                        stopCursorBlink();
+                        if (mdContainer.contains(cursorElement)) {
+                            mdContainer.removeChild(cursorElement);
+                        }
+
+                        // 最终内容直接更新到当前消息，不创建新消息
+                        updateMarkdownContent(mdContainer, buffer);
+                    }
+                    else if (data.type === 'error') {
+                        stopCursorBlink();
+                        if (mdContainer.contains(cursorElement)) {
+                            mdContainer.removeChild(cursorElement);
+                        }
+                        updateMarkdownContent(mdContainer, `错误: ${data.content || '未知错误'}`);
+                    }
+
+                    scrollToBottom();
+                } catch (e) {
+                    console.error('解析流数据错误:', e, line);
+                }
+            }
+        }
+
+        // 确保最终内容已显示并移除光标
+        if (!hasFinalContent) {
+            stopCursorBlink();
+            if (mdContainer.contains(cursorElement)) {
+                mdContainer.removeChild(cursorElement);
+            }
+            // 直接更新当前消息内容，不调用updateAssistantMessage
+            updateMarkdownContent(mdContainer, buffer);
+        }
+    } catch (error) {
+        // 移除打字指示器和光标
+        stopCursorBlink();
+        if (contentElement.contains(typingIndicator)) {
+            contentElement.removeChild(typingIndicator);
+        }
+        if (mdContainer.contains(cursorElement)) {
+            mdContainer.removeChild(cursorElement);
+        }
+
+        // 显示错误信息
+        if (error.name !== 'AbortError') {
+            contentElement.innerHTML = `<div class="markdown-content">抱歉，处理请求时发生错误: ${error.message}</div>`;
+        } else {
+            // 请求被取消，不显示错误信息
+            console.log('流式请求被取消');
+        }
+    } finally {
+        // 清除AbortController引用
+        currentStreamController = null;
+    }
+
+    // 启动光标闪烁效果
+    function startCursorBlink() {
+        cursorElement.style.opacity = '1';
+        typingTimeout = setInterval(() => {
+            cursorElement.style.opacity = cursorElement.style.opacity === '0' ? '1' : '0';
+        }, 500);
+    }
+
+    // 重置光标闪烁 (重新开始计时)
+    function resetCursorBlink() {
+        if (cursorElement) {
+            cursorElement.style.opacity = '1';
+            if (typingTimeout) {
+                clearInterval(typingTimeout);
+            }
+            typingTimeout = setInterval(() => {
+                cursorElement.style.opacity = cursorElement.style.opacity === '0' ? '1' : '0';
+            }, 500);
+        }
+    }
+
+    // 停止光标闪烁
+    function stopCursorBlink() {
+        if (typingTimeout) {
+            clearInterval(typingTimeout);
+            typingTimeout = null;
+        }
+    }
+
+    // 更新流式内容 (简单格式化)
+    function updateStreamingContent(container, content) {
+        // 移除当前的光标
+        if (container.contains(cursorElement)) {
+            container.removeChild(cursorElement);
+        }
+
+        // 格式化内容
+        let formattedContent = content
+            // 格式化粗体
+            .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+            // 格式化斜体
+            .replace(/\*(.*?)\*/g, '<em>$1</em>')
+            // 格式化行内代码
+            .replace(/`([^`]+)`/g, '<code>$1</code>')
+            // 替换换行
+            .replace(/\n/g, '<br>');
+
+        // 更新内容并添加光标
+        container.innerHTML = DOMPurify.sanitize(formattedContent);
+        container.appendChild(cursorElement);
+    }
+}
+
+// 打开编辑标题模态框
+function openEditTitleModal(conversationId, currentTitle) {
+    const modal = document.getElementById('edit-title-modal');
+    const input = document.getElementById('conversation-title-input');
+
+    // 设置当前值和数据
+    input.value = currentTitle || '';
+    document.getElementById('save-title-button').dataset.conversationId = conversationId;
+
+    // 显示模态框并聚焦输入框
+    modal.classList.add('active');
+    input.focus();
+}
+
+// 保存对话标题
+async function saveConversationTitle() {
+    const modal = document.getElementById('edit-title-modal');
+    const input = document.getElementById('conversation-title-input');
+    const saveButton = document.getElementById('save-title-button');
+    const conversationId = saveButton.dataset.conversationId;
+    const newTitle = input.value.trim() || '新对话';
+
+    try {
+        const response = await fetch(`${CONVERSATIONS_API_ENDPOINT}/${conversationId}/title`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ title: newTitle })
+        });
+
+        if (!response.ok) throw new Error(`服务器错误: ${response.status}`);
+
+        // 更新本地对话列表
+        const conversation = conversations.find(c => c.id === conversationId);
+        if (conversation) {
+            conversation.title = newTitle;
+            updateConversationsList();
+        }
+
+        // 关闭模态框
+        modal.classList.remove('active');
+    } catch (error) {
+        console.error('更新对话标题失败:', error);
+        alert(`更新对话标题失败: ${error.message}`);
+    }
+}
+
+// 确认删除对话
+function confirmDeleteConversation(conversationId) {
+    const modal = document.getElementById('confirm-modal');
+    const message = document.getElementById('confirm-message');
+    const confirmButton = document.getElementById('confirm-yes-button');
+
+    message.textContent = '确定要删除此对话吗？此操作不可撤销。';
+    confirmButton.dataset.action = 'delete-conversation';
+    confirmButton.dataset.conversationId = conversationId;
+
+    modal.classList.add('active');
+}
+
+// 确认清空所有对话
+function confirmClearAllConversations() {
+    const modal = document.getElementById('confirm-modal');
+    const message = document.getElementById('confirm-message');
+    const confirmButton = document.getElementById('confirm-yes-button');
+
+    if (!modal || !message || !confirmButton) {
+        console.error('确认模态框元素未找到');
+        return;
+    }
+
+    message.textContent = '确定要清空所有对话吗？此操作不可撤销。';
+    confirmButton.dataset.action = 'clear-all-conversations';
+
+    modal.classList.add('active');
+}
+
+// 处理确认操作
+async function handleConfirmAction() {
+    const confirmButton = document.getElementById('confirm-yes-button');
+    const modal = document.getElementById('confirm-modal');
+
+    if (!confirmButton || !modal) {
+        console.error('确认按钮或模态框元素未找到');
+        return;
+    }
+
+    const action = confirmButton.dataset.action;
+
+    try {
+        if (action === 'delete-conversation') {
+            const conversationId = confirmButton.dataset.conversationId;
+            await deleteConversation(conversationId);
+        } else if (action === 'clear-all-conversations') {
+            await clearAllConversations();
+        }
+
+        // 关闭模态框
+        modal.classList.remove('active');
+    } catch (error) {
+        console.error('操作失败:', error);
+        alert(`操作失败: ${error.message}`);
+        modal.classList.remove('active');
+    }
+}
+
+// 删除指定对话
+async function deleteConversation(conversationId) {
+    if (!confirm('确定要删除此对话吗？此操作不可撤销。')) return;
+
+    try {
+        const response = await fetch(`${CONVERSATIONS_API_ENDPOINT}/${conversationId}`, {
+            method: 'DELETE'
+        });
+
+        if (!response.ok) throw new Error(`服务器错误: ${response.status}`);
+    } catch (error) {
+        console.error('删除对话失败:', error);
+        alert(`删除对话失败: ${error.message}`);
+    }
+}
+
+// 清空所有对话
+async function clearAllConversations() {
+    try {
+        const response = await fetch(CONVERSATIONS_API_ENDPOINT, {
+            method: 'DELETE'
+        });
+
+        if (!response.ok) throw new Error(`服务器错误: ${response.status}`);
+
+        // 刷新对话列表
+        await fetchConversations();
+
+        // 清空当前对话ID
+        currentConversationId = null;
+
+        // 清空聊天界面
+        if (chatMessages) {
+            chatMessages.innerHTML = '';
+        }
+
+        // 创建新对话
+        await createNewConversation();
+    } catch (error) {
+        console.error('清空所有对话失败:', error);
+        throw error;
+    }
+}
+
+// 配置编辑器自动初始化
+setTimeout(() => {
+    const configEditor = document.getElementById('config-editor');
+    if (configEditor && window.CodeMirror && !window.cmConfigEditor) {
+        console.log('自动初始化配置编辑器...');
+
+        // 尝试移除现有的CodeMirror实例
+        const existingCM = configEditor.nextSibling;
+        if (existingCM && existingCM.classList && existingCM.classList.contains('CodeMirror')) {
+            existingCM.remove();
+        }
+
+        // 创建编辑器实例
+        const cmEditor = window.CodeMirror.fromTextArea(configEditor, {
+            mode: { name: "javascript", json: true },
+            theme: "dracula",
+            lineNumbers: true,
+            autoCloseBrackets: true,
+            matchBrackets: true,
+            indentUnit: 4,
+            lineWrapping: true,
+            foldGutter: true,
+            gutters: ['CodeMirror-linenumbers', 'CodeMirror-foldgutter'],
+        });
+
+        // 加载配置
+        fetch('/api/config')
+            .then(response => response.json())
+            .then(config => {
+                cmEditor.setValue(JSON.stringify(config, null, 4));
+                console.log('配置加载完成');
+
+                // 设置编辑器自适应高度
+                setTimeout(() => {
+                    cmEditor.refresh();
+                }, 200);
+            })
+            .catch(error => {
+                console.error('加载配置错误:', error);
+            });
+
+        // 存储到全局
+        window.cmConfigEditor = cmEditor;
+
+        // 监听标签切换，刷新编辑器大小
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabId = tab.getAttribute('data-tab');
+                if (tabId === 'config-tab' && window.cmConfigEditor) {
+                    setTimeout(() => {
+                        window.cmConfigEditor.refresh();
+                    }, 50);
+                }
+            });
+        });
+    }
+}, 100);
+
+// 更新配置
+async function updateConfig() {
+    const configStatus = document.getElementById('config-status');
+    const updateConfigButton = document.getElementById('update-config-button');
+
+    if (!configStatus || !updateConfigButton) {
+        console.error('配置状态或更新按钮元素未找到');
+        return;
+    }
+
+    try {
+        // 获取编辑器实例
+        const editor = window.cmConfigEditor;
+        if (!editor) {
+            showConfigStatus('error', '配置编辑器未初始化', configStatus);
+            return;
+        }
+
+        const configJson = editor.getValue();
+        const configData = JSON.parse(configJson);
+
+        updateConfigButton.disabled = true;
+        updateConfigButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 更新中...';
+
+        const response = await fetch('/api/config/update', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ config: configData })
+        });
+
+        const result = await response.json();
+
+        if (response.ok) {
+            configStatus.textContent = '配置已成功更新并应用！';
+            configStatus.className = 'status-message success';
+        } else {
+            configStatus.textContent = `更新失败: ${result.message || '未知错误'}`;
+            configStatus.className = 'status-message error';
+        }
+    } catch (error) {
+        console.error('更新配置错误:', error);
+        showConfigStatus('error', `配置格式错误: ${error.message}`, configStatus);
+    } finally {
+        updateConfigButton.disabled = false;
+        updateConfigButton.innerHTML = '<i class="fas fa-save"></i> 更新配置';
+
+        // 3秒后清除状态消息
+        setTimeout(() => {
+            configStatus.textContent = '';
+            configStatus.className = 'status-message';
+        }, 3000);
+    }
+}
+
+// 显示配置状态消息
+function showConfigStatus(type, message, statusElement) {
+    if (!statusElement) {
+        statusElement = document.getElementById('config-status');
+        if (!statusElement) {
+            console.error('配置状态元素未找到');
+            return;
+        }
+    }
+
+    statusElement.textContent = message;
+    statusElement.className = 'status-message ' + type;
+
+    // 5秒后自动隐藏
+    setTimeout(() => {
+        statusElement.className = 'status-message';
+    }, 5000);
+}

@@ -1,0 +1,13 @@
+{
+    "mcpServers": {
+        "duckduckgo-mcp-server": {
+            "command": "uvx",
+            "args": [
+                "duckduckgo-mcp-server"
+            ]
+        },
+        "baidu-disk-mcp-server": {
+            "url": "https://mcp-pan.baidu.com/sse?access_token=xxxxx"
+        }
+    }
+}
