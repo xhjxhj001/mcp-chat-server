@@ -1,6 +1,6 @@
 services:
   mcp-agent-web:
-    image: mcp-agent-web
+    image: luckyboystar/mcp-agent-web
     # build:
     #   context: .
     #   dockerfile: Dockerfile
@@ -8,6 +8,7 @@ services:
     ports:
       - "8000:8000"
     volumes:
+      - ./:/app
       - ./mcp_server_config.json:/app/mcp_server_config.json
     env_file:
       - .env
@@ -17,4 +18,5 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 20s 
+      start_period: 20s
+    command: ["python3", "web_server.py"] 

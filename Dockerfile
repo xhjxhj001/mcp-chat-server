@@ -89,16 +89,10 @@ RUN npm init -y \
     && npx playwright install-deps chromium
 
 # 配置pip使用腾讯云镜像源并安装Python依赖
-RUN pip3 install fastapi uvicorn python-dotenv pydantic-ai httpx
+RUN pip3 install fastapi uvicorn python-dotenv pydantic-ai httpx -i https://pypi.tuna.tsinghua.edu.cn/simple
 
-
+# 添加uv
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 复制项目文件
-COPY . /app/
-
-# 创建默认配置文件
-RUN if [ ! -f "mcp_server_config.json" ]; then cp mcp_server_config.json.example mcp_server_config.json; fi
 
 # 设置环境变量
 ENV PYTHONUNBUFFERED=1
@@ -129,5 +123,5 @@ RUN mkdir -p /usr/local/bin && \
 USER mcpuser
 ENV PATH="/usr/local/bin:$PATH"
 
-# 使用python3直接启动，但允许docker-compose覆盖
+# 设置容器启动点，但不指定任何具体命令，让docker-compose.yml来指定
 CMD ["python3", "web_server.py"]
