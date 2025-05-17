@@ -1,3 +1,6 @@
 .env
 mcp_server_config.json
 __pycache__/
+node_modules/
+package-lock.json
+package.json

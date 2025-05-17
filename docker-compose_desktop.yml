@@ -1,0 +1,36 @@
+version: '3'
+
+services:
+  ubuntu-desktop:
+    image: gezp/ubuntu-desktop:22.04-cu11.8.0
+    container_name: my_workspace
+    restart: on-failure
+    shm_size: 1024m
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    env_file:
+      - .env
+    environment:
+      - USER=ubuntu
+      - PASSWORD=ubuntu
+      - GID=1000
+      - UID=1000
+      - REMOTE_DESKTOP=kasmvnc
+    ports:
+      - "10022:22"
+      - "14000:4000"
+      - "8100:8000"
+      - "15000:5000"
+    volumes:
+      - ./:/app
+      - ./mcp_server_config.json:/app/mcp_server_config.json
+    command: >
+      bash -c "cd /app && 
+      sudo ./linux_init.sh &&
+      python3 web_server.py"
+    

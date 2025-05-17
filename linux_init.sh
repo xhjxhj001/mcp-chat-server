@@ -116,9 +116,7 @@ cd /app
 # 安装Playwright
 print_yellow "正在安装Playwright..."
 npm init -y
-npm install -D playwright
-npx playwright install --with-deps chromium
-npx playwright install-deps chromium
+npx playwright install
 
 # 配置pip使用腾讯云镜像源并安装Python依赖
 print_yellow "正在安装Python依赖..."
@@ -146,19 +144,19 @@ find /home/*/.local/bin -name "uvx" -exec cp {} /usr/local/bin/ \; 2>/dev/null |
 chmod +x /usr/local/bin/uv /usr/local/bin/uvx 2>/dev/null || true
 
 # 询问是否创建新用户
-read -p "是否创建具有sudo权限的新用户? (y/n): " CREATE_USER
-if [[ "$CREATE_USER" == "y" || "$CREATE_USER" == "Y" ]]; then
-    read -p "请输入用户名: " USERNAME
-    read -s -p "请输入密码: " PASSWORD
-    echo ""
+# read -p "是否创建具有sudo权限的新用户? (y/n): " CREATE_USER
+# if [[ "$CREATE_USER" == "y" || "$CREATE_USER" == "Y" ]]; then
+#     read -p "请输入用户名: " USERNAME
+#     read -s -p "请输入密码: " PASSWORD
+#     echo ""
     
-    print_yellow "正在创建用户 $USERNAME..."
-    useradd -m -s /bin/bash $USERNAME
-    echo "$USERNAME:$PASSWORD" | chpasswd
-    adduser $USERNAME sudo
-    echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
-    print_green "用户 $USERNAME 创建成功!"
-fi
+#     print_yellow "正在创建用户 $USERNAME..."
+#     useradd -m -s /bin/bash $USERNAME
+#     echo "$USERNAME:$PASSWORD" | chpasswd
+#     adduser $USERNAME sudo
+#     echo "$USERNAME ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+#     print_green "用户 $USERNAME 创建成功!"
+# fi
 
 # 完成安装
 print_green "======================================================"
