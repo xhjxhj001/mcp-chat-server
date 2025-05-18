@@ -29,8 +29,4 @@ services:
     volumes:
       - ./:/app
       - ./mcp_server_config.json:/app/mcp_server_config.json
-    command: >
-      bash -c "cd /app && 
-      sudo ./linux_init.sh &&
-      python3 web_server.py"
     

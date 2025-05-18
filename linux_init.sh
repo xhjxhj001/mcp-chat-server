@@ -122,10 +122,11 @@ npx playwright install
 print_yellow "正在安装Python依赖..."
 pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple pip -U
 pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple fastapi uvicorn python-dotenv pydantic-ai httpx
-
+pip3 install -i https://pypi.tuna.tsinghua.edu.cn/simple uvx
 # 添加uv
 print_yellow "正在配置uv..."
 curl -LsSf https://astral.sh/uv/install.sh | sh
+source $HOME/.local/bin/env
 
 # 设置环境变量
 print_yellow "正在设置环境变量..."
