@@ -9,5 +9,6 @@
         "baidu-disk-mcp-server": {
             "url": "https://mcp-pan.baidu.com/sse?access_token=xxxxx"
         }
-    }
+    },
+    "defaultSystemPrompt": "你是一个人工智能助手，擅长使用工具，如果没有特殊要求，请用中文回答用户问题"
 }

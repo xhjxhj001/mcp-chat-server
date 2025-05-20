@@ -498,18 +498,26 @@ async function handleStandardRequest(query, historyTurns) {
             })
         });
 
-        if (!response.ok) {
-            throw new Error(`服务器错误: ${response.status}`);
-        }
-
-        const data = await response.json();
-        console.log("接收到非流式回复:", data); // 添加日志
-
         // 删除加载指示器
         const typingIndicator = loadingMessage.querySelector('.typing-indicator');
         if (typingIndicator) {
             typingIndicator.remove();
         }
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ detail: "未知错误" }));
+
+            // 针对特定错误码显示友好信息
+            if (response.status === 503) {
+                updateAssistantMessage(loadingMessage, `⚠️ **服务器正在维护中**\n\n${errorData.detail || "服务器正在重启或维护中，请稍后再试。"}`);
+            } else {
+                updateAssistantMessage(loadingMessage, `⚠️ **请求错误 (${response.status})**\n\n${errorData.detail || response.statusText}`);
+            }
+            return;
+        }
+
+        const data = await response.json();
+        console.log("接收到非流式回复:", data); // 添加日志
 
         // 更新消息内容 - 使用正确的属性名answer而不是response
         updateAssistantMessage(loadingMessage, data.answer);
@@ -519,7 +527,13 @@ async function handleStandardRequest(query, historyTurns) {
         if (typingIndicator) {
             typingIndicator.remove();
         }
-        updateAssistantMessage(loadingMessage, `抱歉，处理请求时发生错误: ${error.message}`);
+
+        // 连接错误的更友好提示
+        if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
+            updateAssistantMessage(loadingMessage, `⚠️ **无法连接到服务器**\n\n服务器可能正在重启或维护中，请稍后再试。`);
+        } else {
+            updateAssistantMessage(loadingMessage, `⚠️ **处理请求时发生错误**\n\n${error.message}`);
+        }
     }
 }
 
@@ -570,21 +584,32 @@ async function handleStreamRequest(query, historyTurns) {
             signal: currentStreamController.signal
         });
 
-        if (!response.ok) {
-            throw new Error(`服务器错误: ${response.status}`);
-        }
-
-        // 获取响应流
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-
         // 移除打字指示器并添加Markdown容器
         if (contentElement.contains(typingIndicator)) {
             contentElement.removeChild(typingIndicator);
             contentElement.appendChild(mdContainer);
-            mdContainer.appendChild(cursorElement);
-            startCursorBlink();
         }
+
+        if (!response.ok) {
+            // 处理错误响应
+            const errorData = await response.json().catch(() => ({ detail: "未知错误" }));
+
+            // 根据不同状态码显示不同信息
+            if (response.status === 503) {
+                updateMarkdownContent(mdContainer, `⚠️ **服务器正在维护中**\n\n${errorData.detail || "服务器正在重启或维护中，请稍后再试。"}`);
+            } else {
+                updateMarkdownContent(mdContainer, `⚠️ **请求错误 (${response.status})**\n\n${errorData.detail || response.statusText}`);
+            }
+            return;
+        }
+
+        // 添加闪烁光标
+        mdContainer.appendChild(cursorElement);
+        startCursorBlink();
+
+        // 获取响应流
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
 
         // 处理流数据
         while (true) {
@@ -629,7 +654,7 @@ async function handleStreamRequest(query, historyTurns) {
                         if (mdContainer.contains(cursorElement)) {
                             mdContainer.removeChild(cursorElement);
                         }
-                        updateMarkdownContent(mdContainer, `错误: ${data.content || '未知错误'}`);
+                        updateMarkdownContent(mdContainer, `⚠️ **错误**\n\n${data.error || '未知错误'}`);
                     }
 
                     scrollToBottom();
@@ -654,16 +679,29 @@ async function handleStreamRequest(query, historyTurns) {
         if (contentElement.contains(typingIndicator)) {
             contentElement.removeChild(typingIndicator);
         }
+
+        // 创建或确保Markdown容器存在
+        let markdownContainer = contentElement.querySelector('.markdown-content-stream');
+        if (!markdownContainer) {
+            markdownContainer = document.createElement('div');
+            markdownContainer.className = 'markdown-content-stream';
+            contentElement.appendChild(markdownContainer);
+        }
+
         if (mdContainer.contains(cursorElement)) {
             mdContainer.removeChild(cursorElement);
         }
 
         // 显示错误信息
-        if (error.name !== 'AbortError') {
-            contentElement.innerHTML = `<div class="markdown-content">抱歉，处理请求时发生错误: ${error.message}</div>`;
-        } else {
+        if (error.name === 'AbortError') {
             // 请求被取消，不显示错误信息
             console.log('流式请求被取消');
+        } else if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
+            // 连接错误的更友好提示
+            updateMarkdownContent(markdownContainer, `⚠️ **无法连接到服务器**\n\n服务器可能正在重启或维护中，请稍后再试。`);
+        } else {
+            // 其他错误
+            updateMarkdownContent(markdownContainer, `⚠️ **处理请求时发生错误**\n\n${error.message}`);
         }
     } finally {
         // 清除AbortController引用
@@ -963,24 +1001,121 @@ async function updateConfig() {
         const result = await response.json();
 
         if (response.ok) {
-            configStatus.textContent = '配置已成功更新并应用！';
-            configStatus.className = 'status-message success';
+            configStatus.textContent = '配置更新中，服务器正在重启...';
+            configStatus.className = 'status-message info';
+
+            // 如果后端返回了更新ID，则开始轮询状态
+            if (result.update_id) {
+                pollConfigUpdateStatus(result.update_id);
+            } else {
+                // 没有更新ID时的处理
+                setTimeout(() => {
+                    configStatus.textContent = '配置已更新，但无法跟踪重启状态';
+                    configStatus.className = 'status-message success';
+                    updateConfigButton.disabled = false;
+                    updateConfigButton.innerHTML = '<i class="fas fa-save"></i> 更新配置';
+                }, 2000);
+            }
         } else {
             configStatus.textContent = `更新失败: ${result.message || '未知错误'}`;
             configStatus.className = 'status-message error';
+            updateConfigButton.disabled = false;
+            updateConfigButton.innerHTML = '<i class="fas fa-save"></i> 更新配置';
         }
     } catch (error) {
         console.error('更新配置错误:', error);
         showConfigStatus('error', `配置格式错误: ${error.message}`, configStatus);
-    } finally {
         updateConfigButton.disabled = false;
         updateConfigButton.innerHTML = '<i class="fas fa-save"></i> 更新配置';
+    }
+}
 
-        // 3秒后清除状态消息
-        setTimeout(() => {
-            configStatus.textContent = '';
-            configStatus.className = 'status-message';
-        }, 3000);
+// 轮询配置更新状态
+async function pollConfigUpdateStatus(updateId, attempts = 0) {
+    const configStatus = document.getElementById('config-status');
+    const updateConfigButton = document.getElementById('update-config-button');
+
+    if (!configStatus || !updateConfigButton) {
+        console.error('配置状态或更新按钮元素未找到');
+        return;
+    }
+
+    // 最大尝试次数 (60秒)
+    const maxAttempts = 60;
+
+    try {
+        const response = await fetch('/api/config/status');
+        if (!response.ok) {
+            throw new Error(`服务器错误: ${response.status}`);
+        }
+
+        const statusData = await response.json();
+
+        // 检查是否为当前更新ID
+        if (statusData.update_id !== updateId) {
+            console.log('更新ID不匹配，可能是另一个更新进程');
+            updateConfigButton.disabled = false;
+            updateConfigButton.innerHTML = '<i class="fas fa-save"></i> 更新配置';
+            return;
+        }
+
+        // 更新状态显示
+        if (statusData.updating) {
+            // 仍在更新中
+            configStatus.textContent = statusData.message || '配置更新中，服务器正在重启...';
+            configStatus.className = 'status-message info';
+
+            // 继续轮询
+            if (attempts < maxAttempts) {
+                setTimeout(() => pollConfigUpdateStatus(updateId, attempts + 1), 1000);
+            } else {
+                // 超时
+                configStatus.textContent = '配置更新超时，请刷新页面查看状态';
+                configStatus.className = 'status-message warning';
+                updateConfigButton.disabled = false;
+                updateConfigButton.innerHTML = '<i class="fas fa-save"></i> 更新配置';
+            }
+        } else {
+            // 更新已完成
+            if (statusData.success) {
+                configStatus.textContent = statusData.message || '配置已成功更新并应用！';
+                configStatus.className = 'status-message success';
+            } else {
+                configStatus.textContent = statusData.message || '配置更新失败';
+                configStatus.className = 'status-message error';
+            }
+
+            updateConfigButton.disabled = false;
+            updateConfigButton.innerHTML = '<i class="fas fa-save"></i> 更新配置';
+
+            // 5秒后清除状态消息
+            setTimeout(() => {
+                if (configStatus.textContent === statusData.message) {
+                    configStatus.textContent = '';
+                    configStatus.className = 'status-message';
+                }
+            }, 5000);
+        }
+    } catch (error) {
+        console.error('轮询配置状态错误:', error);
+
+        // 如果服务器正在重启中，可能暂时无法连接，继续轮询
+        if (attempts < maxAttempts) {
+            // 更新状态消息以反映连接问题
+            if (error.name === 'TypeError' && error.message.includes('Failed to fetch')) {
+                configStatus.textContent = '正在等待服务器重启完成...';
+                configStatus.className = 'status-message info';
+            }
+
+            // 增加轮询间隔，减小服务器负担
+            const delay = Math.min(1000 * (1 + attempts * 0.1), 3000); // 逐渐增加延迟，最大3秒
+            setTimeout(() => pollConfigUpdateStatus(updateId, attempts + 1), delay);
+        } else {
+            configStatus.textContent = `无法获取更新状态: ${error.message}`;
+            configStatus.className = 'status-message error';
+            updateConfigButton.disabled = false;
+            updateConfigButton.innerHTML = '<i class="fas fa-save"></i> 更新配置';
+        }
     }
 }
 

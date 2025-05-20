@@ -59,6 +59,15 @@ mcp_config = {}
 # 标记需要重启的状态
 agent_restart_required = False
 
+# 配置更新状态追踪
+config_update_status = {
+    "updating": False,
+    "last_update_time": None,
+    "success": None,
+    "message": "",
+    "update_id": None
+}
+
 # 对话历史存储
 conversation_history = {}
 
@@ -84,7 +93,8 @@ class QueryRequest(BaseModel):
     query: str
     conversation_id: Optional[str] = None
     history_turns: int = 5  # 默认引用5轮历史对话
-    system_prompt: Optional[str] = "你是一个人工智能助手，擅长使用工具解决问题，请用中文回答用户的问题"
+    system_prompt: Optional[str] = None  # 改为可选字段
+    use_default_system_prompt: bool = True  # 是否使用配置文件中的默认系统提示符
 
 
 class QueryResponse(BaseModel):
@@ -119,6 +129,7 @@ class ConfigUpdateResponse(BaseModel):
     """配置更新响应模型"""
     success: bool
     message: str
+    update_id: Optional[str] = None
 
 
 def load_mcp_servers_from_config(config_path: str = MCP_CONFIG_PATH) -> List:
@@ -189,7 +200,7 @@ def load_mcp_servers_from_config(config_path: str = MCP_CONFIG_PATH) -> List:
 
 async def initialize_agent():
     """初始化Agent和MCP服务器"""
-    global agent, mcp_stack, model_settings
+    global agent, mcp_stack, model_settings, mcp_config
 
     # 创建模型
     model = OpenAIModel(
@@ -203,8 +214,27 @@ async def initialize_agent():
     # 加载MCP服务器
     mcp_servers = load_mcp_servers_from_config()
 
-    # 创建Agent，添加支持Markdown的系统提示
-    system_prompt = """你是一个人工智能助手，擅长使用工具解决问题，请用中文回答用户的问题。
+    # 从配置文件加载系统提示符
+    try:
+        with open(MCP_CONFIG_PATH, "r", encoding="utf-8") as f:
+            mcp_config = json.load(f)
+            system_prompt = mcp_config.get("defaultSystemPrompt", """你是一个人工智能助手，擅长使用工具解决问题，请用中文回答用户的问题。
+    
+你的回答将被渲染为Markdown格式，因此你可以：
+- 使用**加粗**或*斜体*等Markdown语法来强调重要内容
+- 使用`代码块`展示代码，并指定语言来启用语法高亮，例如：
+```python
+def hello():
+    print("Hello, world!")
+```
+- 使用表格、列表、标题等各种Markdown元素来组织信息
+- 插入超链接：[链接文本](URL)
+
+请充分利用这些格式来提供清晰、结构化的回答。
+""")
+    except Exception as e:
+        logger.warning(f"读取配置文件中的系统提示符时出错: {str(e)}，使用默认提示符")
+        system_prompt = """你是一个人工智能助手，擅长使用工具解决问题，请用中文回答用户的问题。
     
 你的回答将被渲染为Markdown格式，因此你可以：
 - 使用**加粗**或*斜体*等Markdown语法来强调重要内容
@@ -218,6 +248,8 @@ def hello():
 
 请充分利用这些格式来提供清晰、结构化的回答。
 """
+
+    # 创建Agent
     agent = Agent(model, mcp_servers=mcp_servers,
                   system_prompt=system_prompt, model_settings=model_settings)
 
@@ -239,34 +271,82 @@ async def shutdown_event():
     logger.info("已关闭所有MCP服务器")
 
 
-# 后台重启Agent任务
-async def restart_agent_task():
-    """在后台重启Agent和MCP服务器的任务"""
-    global agent, mcp_stack, agent_restart_required, model_settings
+# 后台重启Agent任务，带有状态更新
+async def restart_agent_task_with_status(update_id: str):
+    """在后台重启Agent和MCP服务器的任务，并更新状态"""
+    global agent, mcp_stack, agent_restart_required, model_settings, mcp_config, config_update_status
 
     try:
         # 重置标志
         agent_restart_required = False
 
-        # 关闭现有MCP服务器
+        # 更新状态到"正在关闭旧服务"
+        if config_update_status.get("update_id") == update_id:
+            config_update_status = {
+                "updating": True,
+                "last_update_time": datetime.now(),
+                "success": None,
+                "message": "正在关闭现有MCP服务器...",
+                "update_id": update_id
+            }
+
+        # 先保存旧的stack引用，然后创建新的stack
         old_stack = mcp_stack
         mcp_stack = AsyncExitStack()
 
-        # 先创建新的Agent实例
-        model = OpenAIModel(
-            os.getenv("MCP_LLM_API_MODEL_NAME"),
-            provider=OpenAIProvider(
-                base_url=os.getenv("MCP_LLM_API_BASE_URL"),
-                api_key=os.getenv("MCP_LLM_API_KEY")
-            ),
-        )
+        # 先安全地关闭旧的stack
+        try:
+            logger.info("开始关闭旧的MCP服务器...")
+            await old_stack.aclose()
+            logger.info("旧的MCP服务器已成功关闭")
+        except Exception as e:
+            logger.warning(f"关闭旧MCP服务器时出错(可以忽略): {str(e)}")
+            # 等待一段时间，确保资源被释放
+            await asyncio.sleep(2)
 
-        # 加载MCP服务器
-        mcp_servers = load_mcp_servers_from_config()
+        # 更新状态为"正在创建新服务"
+        if config_update_status.get("update_id") == update_id:
+            config_update_status = {
+                "updating": True,
+                "last_update_time": datetime.now(),
+                "success": None,
+                "message": "正在创建新的MCP服务器...",
+                "update_id": update_id
+            }
 
-        # 创建Agent，添加支持Markdown的系统提示
-        system_prompt = """你是一个人工智能助手，擅长使用工具解决问题，请用中文回答用户的问题。
-        
+        # 创建新Agent实例
+        try:
+            # 创建模型
+            model = OpenAIModel(
+                os.getenv("MCP_LLM_API_MODEL_NAME"),
+                provider=OpenAIProvider(
+                    base_url=os.getenv("MCP_LLM_API_BASE_URL"),
+                    api_key=os.getenv("MCP_LLM_API_KEY")
+                ),
+            )
+
+            # 从配置文件加载系统提示符
+            try:
+                with open(MCP_CONFIG_PATH, "r", encoding="utf-8") as f:
+                    mcp_config = json.load(f)
+                    system_prompt = mcp_config.get("defaultSystemPrompt", """你是一个人工智能助手，擅长使用工具解决问题，请用中文回答用户的问题。
+            
+你的回答将被渲染为Markdown格式，因此你可以：
+- 使用**加粗**或*斜体*等Markdown语法来强调重要内容
+- 使用`代码块`展示代码，并指定语言来启用语法高亮，例如：
+```python
+def hello():
+    print("Hello, world!")
+```
+- 使用表格、列表、标题等各种Markdown元素来组织信息
+- 插入超链接：[链接文本](URL)
+
+请充分利用这些格式来提供清晰、结构化的回答。
+""")
+            except Exception as e:
+                logger.warning(f"读取配置文件中的系统提示符时出错: {str(e)}，使用默认提示符")
+                system_prompt = """你是一个人工智能助手，擅长使用工具解决问题，请用中文回答用户的问题。
+            
 你的回答将被渲染为Markdown格式，因此你可以：
 - 使用**加粗**或*斜体*等Markdown语法来强调重要内容
 - 使用`代码块`展示代码，并指定语言来启用语法高亮，例如：
@@ -279,25 +359,91 @@ def hello():
 
 请充分利用这些格式来提供清晰、结构化的回答。
 """
-        # 创建新Agent
-        new_agent = Agent(model, mcp_servers=mcp_servers,
-                          system_prompt=system_prompt, model_settings=model_settings)
 
-        # 启动新的MCP服务器
-        await mcp_stack.enter_async_context(new_agent.run_mcp_servers())
+            # 更新状态为"正在加载MCP服务器"
+            if config_update_status.get("update_id") == update_id:
+                config_update_status = {
+                    "updating": True,
+                    "last_update_time": datetime.now(),
+                    "success": None,
+                    "message": "正在加载MCP服务器...",
+                    "update_id": update_id
+                }
 
-        # 现在安全地关闭旧的stack
-        try:
-            await old_stack.aclose()
+            # 加载MCP服务器
+            mcp_servers = load_mcp_servers_from_config()
+            logger.info(f"已加载 {len(mcp_servers)} 个MCP服务器配置")
+
+            # 更新状态为"正在启动服务"
+            if config_update_status.get("update_id") == update_id:
+                config_update_status = {
+                    "updating": True,
+                    "last_update_time": datetime.now(),
+                    "success": None,
+                    "message": "正在启动服务器...",
+                    "update_id": update_id
+                }
+
+            # 创建新Agent
+            new_agent = Agent(model, mcp_servers=mcp_servers,
+                              system_prompt=system_prompt, model_settings=model_settings)
+
+            # 启动新的MCP服务器
+            await mcp_stack.enter_async_context(new_agent.run_mcp_servers())
+
+            # 等待一段时间，确保服务器完全启动
+            await asyncio.sleep(2)
+
+            # 更新全局agent引用
+            agent = new_agent
+            logger.info("已重启Agent和MCP服务器")
+
+            # 更新成功状态，确保只在updateID匹配时更新状态
+            if config_update_status.get("update_id") == update_id:
+                config_update_status = {
+                    "updating": False,
+                    "last_update_time": datetime.now(),
+                    "success": True,
+                    "message": "配置更新并重启成功",
+                    "update_id": update_id
+                }
+
         except Exception as e:
-            logger.warning(f"关闭旧MCP服务器时出错(可以忽略): {str(e)}")
+            logger.error(f"创建新Agent时发生错误: {str(e)}")
+            agent_restart_required = True  # 标记需要再次尝试重启
 
-        # 更新全局agent引用
-        agent = new_agent
-        logger.info("已重启Agent和MCP服务器")
+            # 更新失败状态，确保只在updateID匹配时更新状态
+            if config_update_status.get("update_id") == update_id:
+                config_update_status = {
+                    "updating": False,
+                    "last_update_time": datetime.now(),
+                    "success": False,
+                    "message": f"创建新Agent时发生错误: {str(e)}",
+                    "update_id": update_id
+                }
+
     except Exception as e:
         logger.error(f"重启Agent时发生错误: {str(e)}")
         agent_restart_required = True  # 标记需要再次尝试重启
+
+        # 更新失败状态，确保只在updateID匹配时更新状态
+        if config_update_status.get("update_id") == update_id:
+            config_update_status = {
+                "updating": False,
+                "last_update_time": datetime.now(),
+                "success": False,
+                "message": f"重启Agent时发生错误: {str(e)}",
+                "update_id": update_id
+            }
+
+
+# 为了向前兼容保留的函数
+async def restart_agent_task():
+    """向前兼容的Agent重启函数"""
+    global config_update_status
+    # 生成一个临时ID并调用带状态的重启函数
+    temp_id = str(uuid.uuid4())
+    await restart_agent_task_with_status(temp_id)
 
 
 @app.post("/api/query", response_model=QueryResponse)
@@ -311,11 +457,18 @@ async def query(request: QueryRequest) -> QueryResponse:
     Returns:
         查询结果
     """
-    global agent, agent_restart_required, model_settings, conversation_history
+    global agent, agent_restart_required, model_settings, conversation_history, mcp_config, config_update_status
+
+    # 检查是否正在更新配置
+    if config_update_status.get("updating"):
+        raise HTTPException(
+            status_code=503,
+            detail="服务器正在更新配置并重启中，请稍后再试"
+        )
 
     # 检查是否需要重启
     if agent_restart_required:
-        await restart_agent_task()
+        await restart_agent_task_with_status(config_update_status.get("update_id"))
         if agent_restart_required:  # 如果重启失败
             raise HTTPException(status_code=503, detail="系统正在重启中，请稍后再试")
 
@@ -353,12 +506,36 @@ async def query(request: QueryRequest) -> QueryResponse:
                     message_history.append(ModelResponse(
                         parts=[TextPart(msg.content)]))
 
+    # 处理系统提示符
+    system_prompt = None
+    if request.use_default_system_prompt:
+        # 从配置文件中获取系统提示符
+        try:
+            if not mcp_config:
+                with open(MCP_CONFIG_PATH, "r", encoding="utf-8") as f:
+                    mcp_config = json.load(f)
+            system_prompt = mcp_config.get("defaultSystemPrompt")
+        except Exception as e:
+            logger.warning(f"读取配置文件中的系统提示符时出错: {str(e)}，使用默认提示符")
+
+    # 如果配置文件中没有系统提示符或出错，使用请求中的系统提示符
+    if not system_prompt:
+        system_prompt = request.system_prompt
+
     try:
-        # 执行查询
+        # 执行查询，添加系统提示符
+        run_kwargs = {
+            "model_settings": model_settings,
+            "message_history": message_history if message_history else None
+        }
+
+        # 如果有系统提示符，添加到参数中
+        if system_prompt:
+            run_kwargs["system_prompt"] = system_prompt
+
         result = await agent.run(
             request.query,
-            model_settings=model_settings,
-            message_history=message_history if message_history else None
+            **run_kwargs
         )
 
         # 添加用户消息到历史
@@ -418,11 +595,18 @@ async def query_stream(request: QueryRequest):
     Returns:
         流式响应
     """
-    global agent, agent_restart_required, model_settings, conversation_history
+    global agent, agent_restart_required, model_settings, conversation_history, mcp_config, config_update_status
+
+    # 检查是否正在更新配置
+    if config_update_status.get("updating"):
+        raise HTTPException(
+            status_code=503,
+            detail="服务器正在更新配置并重启中，请稍后再试"
+        )
 
     # 检查是否需要重启
     if agent_restart_required:
-        await restart_agent_task()
+        await restart_agent_task_with_status(config_update_status.get("update_id"))
         if agent_restart_required:  # 如果重启失败
             raise HTTPException(status_code=503, detail="系统正在重启中，请稍后再试")
 
@@ -466,6 +650,22 @@ async def query_stream(request: QueryRequest):
                     message_history.append(ModelResponse(
                         parts=[TextPart(msg.content)]))
 
+    # 处理系统提示符
+    system_prompt = None
+    if request.use_default_system_prompt:
+        # 从配置文件中获取系统提示符
+        try:
+            if not mcp_config:
+                with open(MCP_CONFIG_PATH, "r", encoding="utf-8") as f:
+                    mcp_config = json.load(f)
+            system_prompt = mcp_config.get("defaultSystemPrompt")
+        except Exception as e:
+            logger.warning(f"读取配置文件中的系统提示符时出错: {str(e)}，使用默认提示符")
+
+    # 如果配置文件中没有系统提示符或出错，使用请求中的系统提示符
+    if not system_prompt:
+        system_prompt = request.system_prompt
+
     # 完整响应内容
     full_response = ""
 
@@ -480,9 +680,19 @@ async def query_stream(request: QueryRequest):
             # 发送开始标记和会话ID
             yield json.dumps({"type": "start", "conversation_id": conversation_id}) + "\n"
 
+            # 准备运行参数
+            run_kwargs = {
+                "model_settings": model_settings,
+                "message_history": message_history if message_history else None
+            }
+
+            # 如果有系统提示符，添加到参数中
+            if system_prompt:
+                run_kwargs["system_prompt"] = system_prompt
+
             # 使用iter方法和节点迭代器模式进行流式输出
             logger.info(f"消息历史: {message_history}")  # 记录消息历史以便调试
-            async with agent.iter(request.query, model_settings=model_settings, message_history=message_history if message_history else None) as run:
+            async with agent.iter(request.query, **run_kwargs) as run:
                 async for node in run:
                     logger.info(f"处理节点类型: {type(node).__name__}")
                     try:
@@ -567,7 +777,7 @@ async def update_config(request: ConfigUpdateRequest, background_tasks: Backgrou
     Returns:
         更新结果
     """
-    global mcp_config, agent_restart_required
+    global mcp_config, agent_restart_required, config_update_status
 
     try:
         # 验证配置格式
@@ -576,6 +786,16 @@ async def update_config(request: ConfigUpdateRequest, background_tasks: Backgrou
                 success=False,
                 message="配置格式错误：缺少mcpServers字段"
             )
+
+        # 设置更新状态
+        update_id = str(uuid.uuid4())
+        config_update_status = {
+            "updating": True,
+            "last_update_time": datetime.now(),
+            "success": None,
+            "message": "配置更新进行中...",
+            "update_id": update_id
+        }
 
         # 保存配置到文件
         with open(MCP_CONFIG_PATH, "w", encoding="utf-8") as f:
@@ -588,14 +808,23 @@ async def update_config(request: ConfigUpdateRequest, background_tasks: Backgrou
         agent_restart_required = True
 
         # 在后台重启agent
-        background_tasks.add_task(restart_agent_task)
+        background_tasks.add_task(restart_agent_task_with_status, update_id)
 
         return ConfigUpdateResponse(
             success=True,
-            message="配置已更新，MCP服务器正在后台重启"
+            message="配置已更新，MCP服务器正在后台重启",
+            update_id=update_id
         )
     except Exception as e:
         logger.error(f"更新配置时发生错误: {str(e)}")
+        # 更新失败状态
+        config_update_status = {
+            "updating": False,
+            "last_update_time": datetime.now(),
+            "success": False,
+            "message": f"更新配置时发生错误: {str(e)}",
+            "update_id": config_update_status.get("update_id")
+        }
         return ConfigUpdateResponse(
             success=False,
             message=f"更新配置时发生错误: {str(e)}"
@@ -624,6 +853,18 @@ async def get_config():
     except Exception as e:
         logger.error(f"获取配置时发生错误: {str(e)}")
         raise HTTPException(status_code=500, detail=f"获取配置时发生错误: {str(e)}")
+
+
+@app.get("/api/config/status")
+async def get_config_update_status():
+    """
+    获取配置更新状态
+
+    Returns:
+        当前配置更新状态
+    """
+    global config_update_status
+    return config_update_status
 
 
 # 对话管理相关端点
