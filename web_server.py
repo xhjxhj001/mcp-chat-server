@@ -14,6 +14,15 @@ from pydantic_ai import Agent
 from pydantic_ai.mcp import MCPServerHTTP, MCPServerStdio
 from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai.providers.openai import OpenAIProvider
+from pydantic_ai.messages import (
+    FinalResultEvent,
+    FunctionToolCallEvent,
+    FunctionToolResultEvent,
+    PartDeltaEvent,
+    PartStartEvent,
+    TextPartDelta,
+    ToolCallPartDelta,
+)
 from dotenv import load_dotenv
 import uuid
 from datetime import datetime
@@ -706,6 +715,23 @@ async def query_stream(request: QueryRequest):
                                         if content:
                                             full_response += content
                                             yield json.dumps({"type": "content", "content": content}) + "\n"
+                        elif agent.is_call_tools_node:
+                            logger.info(f"处理工具调用节点: {node}")
+                            async with node.stream(run.ctx) as handle_stream:
+                                async for event in handle_stream:
+                                    if isinstance(event, FunctionToolCallEvent):
+                                        yield json.dumps({
+                                            "type": "tool_call",
+                                            "tool_name": event.part.tool_name,
+                                            "args": event.part.args,
+                                            "tool_call_id": event.part.tool_call_id
+                                        }) + "\n"
+                                    elif isinstance(event, FunctionToolResultEvent):
+                                        yield json.dumps({
+                                            "type": "tool_result",
+                                            "tool_call_id": event.tool_call_id,
+                                            "result": event.result.content
+                                        }) + "\n"
                         elif agent.is_end_node(node):
                             # 当到达结束节点时，我们可以获取最终结果
                             logger.info(f"处理结束节点: {node}")
