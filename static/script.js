@@ -537,13 +537,239 @@ async function handleStandardRequest(query, historyTurns) {
     }
 }
 
-// 处理流式请求
+// 工具卡片处理相关函数 ===================
+// 创建工具卡片元素
+function createToolCard(toolName, args, toolCallId) {
+    // 创建卡片主容器
+    const card = document.createElement('div');
+    card.className = 'tool-card';
+    card.setAttribute('data-tool-call-id', toolCallId);
+
+    // 根据工具名称选择合适的图标
+    let iconClass = 'fa-wrench';  // 默认图标
+    let iconColor = '';  // 默认使用CSS中定义的颜色
+
+    // 根据工具类型设置不同的图标
+    if (toolName.includes('search') || toolName.includes('find')) {
+        iconClass = 'fa-search';
+        iconColor = '#4285f4'; // Google蓝色
+    } else if (toolName.includes('web') || toolName.includes('browser')) {
+        iconClass = 'fa-globe';
+        iconColor = '#34a853'; // Google绿色
+    } else if (toolName.includes('file') || toolName.includes('read') || toolName.includes('write')) {
+        iconClass = 'fa-file-alt';
+        iconColor = '#ea4335'; // Google红色
+    } else if (toolName.includes('terminal') || toolName.includes('run') || toolName.includes('execute')) {
+        iconClass = 'fa-terminal';
+        iconColor = '#333333'; // 终端黑色
+    } else if (toolName.includes('edit') || toolName.includes('modify')) {
+        iconClass = 'fa-edit';
+        iconColor = '#fbbc05'; // Google黄色
+    } else if (toolName.includes('list') || toolName.includes('directory')) {
+        iconClass = 'fa-folder-open';
+        iconColor = '#4285f4'; // Google蓝色
+    } else if (toolName.includes('grep') || toolName.includes('code_search')) {
+        iconClass = 'fa-code';
+        iconColor = '#9c27b0'; // 紫色
+    } else if (toolName.includes('delete') || toolName.includes('remove')) {
+        iconClass = 'fa-trash-alt';
+        iconColor = '#ea4335'; // Google红色
+    }
+
+    // 创建卡片头部
+    const header = document.createElement('div');
+    header.className = 'tool-card-header';
+
+    // 工具标题 - 确保工具名称安全显示
+    const title = document.createElement('div');
+    title.className = 'tool-card-title';
+    const displayName = DOMPurify.sanitize(toolName || '未知工具');
+    title.innerHTML = `<i class="fas ${iconClass}" ${iconColor ? `style="color:${iconColor}"` : ''}></i> 工具：${displayName}`;
+
+    // 展开/收起按钮
+    const toggleBtn = document.createElement('button');
+    toggleBtn.className = 'tool-card-toggle';
+    toggleBtn.textContent = '展开';
+
+    header.appendChild(title);
+    header.appendChild(toggleBtn);
+    card.appendChild(header);
+
+    // 创建卡片内容区域
+    const content = document.createElement('div');
+    content.className = 'tool-card-content';
+    content.style.display = 'none'; // 默认收起状态
+
+    // 参数区域
+    const argsSection = document.createElement('div');
+    argsSection.className = 'tool-card-args';
+
+    // 结果区域
+    const resultSection = document.createElement('div');
+    resultSection.className = 'tool-card-result';
+
+    content.appendChild(argsSection);
+    content.appendChild(resultSection);
+    card.appendChild(content);
+
+    // 添加展开/收起交互
+    toggleBtn.addEventListener('click', function (e) {
+        e.stopPropagation(); // 防止事件冒泡
+        const isExpanded = content.style.display !== 'none';
+        content.style.display = isExpanded ? 'none' : 'block';
+        toggleBtn.textContent = isExpanded ? '展开' : '收起';
+    });
+
+    // 点击整个标题栏也可以展开/收起
+    header.addEventListener('click', function (e) {
+        if (e.target !== toggleBtn) { // 避免按钮点击事件重复触发
+            toggleBtn.click();
+        }
+    });
+
+    // 更新工具参数方法
+    function updateArgs(argsData) {
+        try {
+            let argsStr;
+            if (typeof argsData === 'string') {
+                // 尝试解析JSON字符串，使格式更美观
+                try {
+                    const parsed = JSON.parse(argsData);
+                    argsStr = JSON.stringify(parsed, null, 2);
+                } catch {
+                    // 如果不是有效JSON，直接使用原始字符串
+                    argsStr = argsData;
+                }
+            } else {
+                argsStr = JSON.stringify(argsData, null, 2);
+            }
+
+            // 使用DOMPurify清理内容
+            argsSection.innerHTML = DOMPurify.sanitize('<b>请求参数：</b><pre>' + argsStr + '</pre>');
+        } catch (err) {
+            argsSection.innerHTML = DOMPurify.sanitize('<b>请求参数：</b><pre>无法解析参数数据</pre>');
+            console.error('解析工具参数失败:', err);
+        }
+    }
+
+    // 更新工具结果方法
+    function updateResult(resultData) {
+        try {
+            let resultStr;
+            if (typeof resultData === 'string') {
+                // 尝试解析JSON字符串，使格式更美观
+                try {
+                    const parsed = JSON.parse(resultData);
+                    resultStr = JSON.stringify(parsed, null, 2);
+                } catch {
+                    // 如果不是有效JSON，直接使用原始字符串
+                    resultStr = resultData;
+                }
+            } else {
+                resultStr = JSON.stringify(resultData, null, 2);
+            }
+
+            // 使用DOMPurify清理内容
+            resultSection.innerHTML = DOMPurify.sanitize('<b>返回结果：</b><pre>' + resultStr + '</pre>');
+
+            // 自动展开显示结果
+            if (content.style.display === 'none') {
+                toggleBtn.click();
+            }
+
+            // 如果结果很长，添加一个"复制"按钮
+            if (resultStr && resultStr.length > 100) {
+                const copyBtn = document.createElement('button');
+                copyBtn.className = 'copy-result-btn';
+                copyBtn.textContent = '复制结果';
+                copyBtn.addEventListener('click', function (e) {
+                    e.stopPropagation();
+                    navigator.clipboard.writeText(resultStr).then(() => {
+                        const originalText = copyBtn.textContent;
+                        copyBtn.textContent = '已复制!';
+                        setTimeout(() => {
+                            copyBtn.textContent = originalText;
+                        }, 1000);
+                    }).catch(err => {
+                        console.error('复制失败:', err);
+                        copyBtn.textContent = '复制失败';
+                    });
+                });
+                resultSection.appendChild(copyBtn);
+            }
+        } catch (err) {
+            resultSection.innerHTML = DOMPurify.sanitize('<b>返回结果：</b><pre>无法解析结果数据</pre>');
+            console.error('解析工具结果失败:', err);
+        }
+    }
+
+    // 初始化参数区域
+    updateArgs(args || {});
+
+    return {
+        element: card,
+        updateArgs,
+        updateResult
+    };
+}
+
+// 管理工具卡片的工具箱对象
+function createToolCardManager() {
+    let cards = {}; // 存储所有卡片的映射表：toolCallId -> card对象
+
+    return {
+        // 获取或创建卡片
+        getOrCreateCard(toolName, args, toolCallId, container) {
+            if (!toolCallId) {
+                console.error('创建工具卡片失败: 缺少tool_call_id');
+                return null;
+            }
+
+            if (!cards[toolCallId]) {
+                const card = createToolCard(toolName, args, toolCallId);
+                if (card && container) {
+                    container.appendChild(card.element);
+                    cards[toolCallId] = card;
+                }
+            }
+            return cards[toolCallId];
+        },
+
+        // 更新卡片参数
+        updateCardArgs(toolCallId, args) {
+            if (cards[toolCallId]) {
+                cards[toolCallId].updateArgs(args);
+            }
+        },
+
+        // 更新卡片结果
+        updateCardResult(toolCallId, result) {
+            if (cards[toolCallId]) {
+                cards[toolCallId].updateResult(result);
+            } else {
+                console.warn(`尝试更新不存在的工具卡片: ${toolCallId}`);
+            }
+        },
+
+        // 清空所有卡片
+        clear() {
+            for (const id in cards) {
+                if (cards[id].element && cards[id].element.parentNode) {
+                    cards[id].element.parentNode.removeChild(cards[id].element);
+                }
+            }
+            cards = {};
+        }
+    };
+}
+
+// 在处理流式请求的函数中，找到处理chunk的部分，修改为支持工具类型消息
 async function handleStreamRequest(query, historyTurns) {
     // 添加助手消息占位符
     const assistantMessage = addMessage('assistant', '');
     const contentElement = assistantMessage.querySelector('.message-content');
     if (!contentElement) {
-        console.error('消息内容元素未找到');
+        console.error('聊天消息容器未找到');
         return;
     }
 
@@ -568,6 +794,13 @@ async function handleStreamRequest(query, historyTurns) {
     const mdContainer = document.createElement('div');
     mdContainer.className = 'markdown-content-stream';
 
+    // 创建工具卡片容器
+    const toolCardsContainer = document.createElement('div');
+    toolCardsContainer.className = 'tool-cards-container';
+
+    // 创建工具卡片管理器
+    const toolCardManager = createToolCardManager();
+
     try {
         // 创建新的AbortController
         currentStreamController = new AbortController();
@@ -584,10 +817,11 @@ async function handleStreamRequest(query, historyTurns) {
             signal: currentStreamController.signal
         });
 
-        // 移除打字指示器并添加Markdown容器
+        // 移除打字指示器并添加内容容器 - 修改顺序，先添加工具卡片容器，再添加Markdown容器
         if (contentElement.contains(typingIndicator)) {
             contentElement.removeChild(typingIndicator);
-            contentElement.appendChild(mdContainer);
+            contentElement.appendChild(toolCardsContainer); // 工具卡片容器放在上方
+            contentElement.appendChild(mdContainer); // Markdown内容容器放在下方
         }
 
         if (!response.ok) {
@@ -629,6 +863,20 @@ async function handleStreamRequest(query, historyTurns) {
 
                 try {
                     const data = JSON.parse(line);
+
+                    // 处理工具调用事件
+                    if (data.type === 'tool_call') {
+                        const { tool_name, args, tool_call_id } = data;
+                        toolCardManager.getOrCreateCard(tool_name, args, tool_call_id, toolCardsContainer);
+                        continue;
+                    }
+
+                    // 处理工具结果事件
+                    if (data.type === 'tool_result') {
+                        const { tool_call_id, result } = data;
+                        toolCardManager.updateCardResult(tool_call_id, result);
+                        continue;
+                    }
 
                     // 根据数据类型处理
                     if (data.type === 'content' && data.content) {
@@ -678,6 +926,11 @@ async function handleStreamRequest(query, historyTurns) {
         stopCursorBlink();
         if (contentElement.contains(typingIndicator)) {
             contentElement.removeChild(typingIndicator);
+        }
+
+        // 确保工具卡片容器已添加到DOM中
+        if (!contentElement.querySelector('.tool-cards-container')) {
+            contentElement.appendChild(toolCardsContainer);
         }
 
         // 创建或确保Markdown容器存在
